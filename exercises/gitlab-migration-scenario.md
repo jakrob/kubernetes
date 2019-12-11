@@ -221,7 +221,7 @@ Delete busybox pod once done
 
 ### Create a volume for Postgres
 
-```
+```yaml
 cat << EOF | tee postgres-pvc.yml
 kind: PersistentVolumeClaim
 apiVersion: v1
@@ -256,7 +256,7 @@ postgres-pvc   Bound    pvc-629ac3a8-3759-45a2-97ee-7de158103ed8   1Gi        RW
 
 Note: in real world scenario you'd better hide the password behind a Secret object.
 
-```
+```yaml
 cat << EOF | tee postgres-config.yml
 apiVersion: v1
 kind: ConfigMap
@@ -278,7 +278,7 @@ EOF
 <br/>
 
 ### Create Postgres deployment
-```
+```yaml
 cat << EOF | tee postgres-deployment.yml
 ---
 apiVersion: apps/v1
@@ -341,7 +341,7 @@ postgres-c5bd4985f-8fw7l   1/1     Running   0          2m10s
 <br/>
 
 ### Expose Postgres via a Service
-```
+```yaml
 cat << EOF | tee postgres-svc.yml
 apiVersion: v1
 kind: Service
@@ -357,17 +357,17 @@ EOF
 ```
 
 ```c
-# kubectl create -f postgres-svc.yml
+kubectl create -f postgres-svc.yml
 ```
 
 *Important Note*: apparently Minikube has a bug that somehow breaks internal DNS resolution, therefore I advise to grab the service IP and use it instead of service DNS in Gitlab configuration below. To obtain the IP execute:
 ```c
-# kubectl get svc postgres-service -o=jsonpath='{.spec.clusterIP}'
+kubectl get svc postgres-service -o=jsonpath='{.spec.clusterIP}'
 ```
 
 You can verify if you are impacted by this bug by executing:
 ```c
-# kubectl exec -it busybox nslookup postgres-service
+kubectl exec -it busybox nslookup postgres-service
 ```
 It should resolve to the clusterIP (you'll need to re-create your busybox).
 
@@ -377,11 +377,11 @@ It should resolve to the clusterIP (you'll need to re-create your busybox).
 
 Note: In addition to importing the dumped database, _gitlab_ role must be created manually, hence one additional step.
 ```c
-# kubectl exec -it postgres[TAB] bash
+kubectl exec -it postgres[TAB] bash
 ```
 ```
-# echo "CREATE ROLE gitlab" | psql -h localhost -d gitlabhq_production -U gitlab-psql
-# psql -h localhost -d gitlabhq_production -U gitlab-psql -f /mnt/gitlab-data-pvc/postgresql/gitlabhq_production.sql > /dev/null 
+echo "CREATE ROLE gitlab" | psql -h localhost -d gitlabhq_production -U gitlab-psql
+psql -h localhost -d gitlabhq_production -U gitlab-psql -f /mnt/gitlab-data-pvc/postgresql/gitlabhq_production.sql > /dev/null 
 ```
 
 <br/>
@@ -392,7 +392,7 @@ Note: In addition to importing the dumped database, _gitlab_ role must be create
 
 If necessary replace "postgres-service" with the clusterIP and crate the following config map:
 
-```
+```yaml
 cat << EOF | tee gitlab-config.yml
 apiVersion: v1
 kind: ConfigMap
@@ -417,7 +417,7 @@ Please note that in real world scenario a hard-coded clusterIP is a bad design p
 
 ### Create Gitlab deployment
 
-```
+```yaml
 cat << EOF | tee gitlab-deployment.yml
 apiVersion: apps/v1
 kind: Deployment
@@ -470,20 +470,20 @@ spec:
 EOF
 ```
 ```c
-# kubectl create -f gitlab-deployment.yml
+kubectl create -f gitlab-deployment.yml
 ```
 
 As previously, it takes some 2-3 minutes for Gitlab components to get up. You can follow the process with:
 
 ```c
-# kubectl logs -f gitlab[TAB]
+kubectl logs -f gitlab[TAB]
 ```
 
 <br/>
 
 ### Create a Load Balancer for Gitlab
 
-```
+```yaml
 cat << EOF | tee gitlab-lb.yml
 apiVersion: v1
 kind: Service
@@ -500,7 +500,7 @@ EOF
 ```
 
 ```c
-# kubectl create -f gitlab-lb.yml
+kubectl create -f gitlab-lb.yml
 ```
 
 
@@ -510,12 +510,12 @@ EOF
 
 Generate your Gitlab URL using its load balancer IP:
 ```c
-# kubectl get svc gitlab-lb -o=jsonpath='http://{.spec.clusterIP}/'
+kubectl get svc gitlab-lb -o=jsonpath='http://{.spec.clusterIP}/'
 ```
 
 Use the following command to make your LoadBalancer available locally:
 ```
-# minikube -p gitlab tunnel
+minikube -p gitlab tunnel
 ```
 
 Point your browser to the address and verify if your are able to login and whether you can see the project you commenced as well as the README.md file you created in it.
