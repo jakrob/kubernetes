@@ -1,5 +1,3 @@
-# *** DRAFT VERSION, NOT FULLY TESTED***
-
 # Gitlab container to Minikube migration scenario
 
 This scenario is meant for training purposes and only covers certain topics of application migration to Kubernetes. Additionally, it is adjusted to work with Minikube, and not necessarily with managed K8s services. Use at your own risk!
@@ -7,7 +5,7 @@ This scenario is meant for training purposes and only covers certain topics of a
 ## Migration outline
 
 The following digram outlines the migration goals, that is:
-* Move from locally deployed docker to Kubernetes running on Minikube
+* Move from locally deployed docker to Kubernetes cluster running on Minikube
 * Decouple Database from the rest of the Gitlab components
 * Migrate data and logs to Persistent Volumes
 * Use ConfigMaps to store parts of Gitlab and Postgres configurations
@@ -17,7 +15,7 @@ The following digram outlines the migration goals, that is:
 
 What this does not include, but a real life scenario probably should:
 * Migration to cloud-based Kubernetes cluster (managed or not)
-* Decouple of Redis from Gitlab
+* Decouple Redis from Gitlab
 * Export any passwords to Kubernetes Secrets
 * Expose Gitlab via HTTPS and add a service for sshd
 * Create PVs on top of some distributed storage like EFS
@@ -38,9 +36,10 @@ The scenario has not been tested with a driver different than VirtualBox, hence 
   
 ## Step 1: Launch local standalone Gitlab container
 
-```
+```bash
 WORKDIR=~/gitlab2k8s
-mkdir -p $WORKDIR 
+mkdir -p ${WORKDIR}
+cd ${WORKDIR}
 sudo docker run --detach \
   --hostname gitlab.localtest.me \
   --publish 80:80 \
@@ -53,7 +52,7 @@ sudo docker run --detach \
 ```
 
 Notes:
-- we cross-mount Gitlab's data, log and config directories to local directories
+- we cross-mount Gitlab's data, log and config directories on docker with local directories
 - Gitlab needs a domain name and *.localtest.me resolves to 127.0.0.1 which we'll use, hence the --hostname setting  
 
 Wait 3-4 minutes until Gitlab components are up - you can observe the status with 
@@ -74,18 +73,18 @@ There:
 ## Step 2: Dump Gitlab PostgreSQL database
 
 "Login" as gitlab-psql:  
-```
-sudo docker exec -it gitlab su - gitlab-psql
+```c
+# sudo docker exec -it gitlab su - gitlab-psql
 ```  
 and execute:  
 ```
 pg_dump -h /var/opt/gitlab/postgresql -d gitlabhq_production > gitlabhq_production.sql
 ```
 
-Gracefully stop the service:
-```
-sudo docker exec -i gitlab gitlab-ctl stop
-sudo docker stop gitlab
+Detach the docker console and gracefully stop the service:
+```c
+# sudo docker exec -i gitlab gitlab-ctl stop
+# sudo docker stop gitlab
 ```
 
 <br/>
@@ -96,15 +95,17 @@ Few notes of explanation here. The gitlab config and data is stored under ${WORK
 - we have this data available locally whereas Minikube works under a VM, so it doesn't have these files,
 - even if we mount the directories on minikube, the 9p driver prevents Gitlab from setting file permissions and this simply won't work.
 
-Therefore we'll use VM-based PersistentVolumes. For migration purposes, let's deploy a transitional pod on which we'll mount our local shares and newly created PVC to the data from one to another.
+Therefore we'll use VM-based PersistentVolumes. For migration purposes, let's deploy a transitional pod on which we'll mount our local shares and newly created PVC to be able to copy the data from one to another.
 
 <br/>
 
 ### Mount local dir on Minikube's VM
 
-First we need to mount our workdir on Minikube's VM to be able to refer to it as a hostPath on busybox - our temporary migration pod.
+First we need to mount our workdir on Minikube's VM to be able to refer to it as a hostPath on busybox - our temporary migration pod. 
 
-```
+_Hint: You'll need to keep that utility running, so you might wabt to open another terminal tab, or use nohup._
+
+```bash
 minikube mount -p gitlab ${WORKDIR}:/gitlab_volumes
 ```
 
@@ -112,9 +113,9 @@ minikube mount -p gitlab ${WORKDIR}:/gitlab_volumes
 
 ### Create PersistentVolumes
 
-Minikube allows dynamic volume provisioning, hence no need to create PersistentVolumes. We only need PersistentVolumeClaims
+Minikube allows dynamic volume provisioning, hence no need to create PersistentVolumes - we only need PersistentVolumeClaims
 
-```
+```yaml
 cat << EOF | tee pvc.yml
 apiVersion: v1
 kind: PersistentVolumeClaim
@@ -142,15 +143,22 @@ spec:
 EOF
 ```
 
+```c
+# kubectl create -f pvc.yml
 ```
-# kubectl create -f busybox.yml
+
+With `kubectl get pvc` we should see output similar to this:
+```
+NAME              STATUS   VOLUME                                     CAPACITY   ACCESS MODES   STORAGECLASS   AGE
+gitlab-data-pvc   Bound    pvc-f65ddb3f-a291-44ac-ad7e-c959336be51e   1Gi        RWX            standard       3s
+gitlab-log-pvc    Bound    pvc-dccf65aa-03a9-41fd-bc44-99ff48f6e06d   1Gi        RWX            standard       2s
 ```
 
 <br/>
 
 ### Create temporary migration pod using Busybox image
 
-```
+```yaml
 cat << EOF | tee busybox.yml
 apiVersion: v1
 kind: Pod
@@ -181,36 +189,37 @@ spec:
 EOF
 ```
 
-```
-# kubectl create -f pvc.yml
+```c
+# kubectl create -f busybox.yml
 ```
 
-Note: /gitlab_volumes is in fact our local $WORKDIR. We've mounted it on VM using _minikube mount_, then mounted on the pod using hostPath volume.
+Note: /gitlab_volumes is in fact our local $WORKDIR. We've mounted it on VM using _minikube mount_. *We need to go deeper* ;), so now we mount that previously mounted volume on the pod using hostPath volume. Does that sound nasty yet? No worries, you'd not do that in a real life scenario. Hopefully.
 
 <br/>
 
 ### Copy the data: 
 
 Copy the data and fix file permissions lost due to 9p driver in VirtualBox
-```
+```c
 # kubectl exec -it busybox sh
 ```
-```
+```bash
 cp -a /mnt/gitlab-data/.* /mnt/gitlab-data/* /mnt/gitlab-data-pvc/
 chown -R 998.998 /mnt/gitlab-data-pvc/ # set owner to git
 chown -R 997.997 /mnt/gitlab-data-pvc/redis # set owner to gitlab-redis
+chown -R 996.996 /mnt/gitlab-data-pvc/postgresql # not necessary but will prevent errors in the logs
 chmod 2770 /mnt/gitlab-data-pvc/git-data/repositories/ # setgid on repositories
 ```
 Delete busybox pod once done
-```
-# kubectl delete -f busybox.yml
+```c
+# kubectl delete -f busybox.yml --force --grace-period 0
 ```
 
 <br/>
 
-## Step 4: Deploy the Database components and import data
+## Step 4: Deploy Database components and import data
 
-### Create Postgres PVC
+### Create a volume for Postgres
 
 ```
 cat << EOF | tee postgres-pvc.yml
@@ -229,13 +238,23 @@ spec:
 EOF
 ```
 
-```
+```c
 # kubectl create -f postgres-pvc.yml
+```
+
+_Note: Obviously 1 Gibibyte is not quite suitable for a real life scenario, but it's enough for training purposes._
+
+Expected output of `kubectl get pvc postgres-pvc`:
+```
+NAME           STATUS   VOLUME                                     CAPACITY   ACCESS MODES   STORAGECLASS   AGE
+postgres-pvc   Bound    pvc-629ac3a8-3759-45a2-97ee-7de158103ed8   1Gi        RWX            standard       18s
 ```
 
 <br/>
 
 ### Create Postgres Configuration
+
+Note: in real world scenario you'd better hide the password behind a Secret object.
 
 ```
 cat << EOF | tee postgres-config.yml
@@ -252,7 +271,7 @@ data:
 EOF
 ```
 
-```
+```c
 # kubectl create -f postgres-config.yml
 ```
 
@@ -299,12 +318,26 @@ spec:
 EOF
 ```
 
-Note purpose for mounting _gitlab-data-pvc_ volume is only for obtaining the dumped database file that has been saved under _/gitlab_volumes/gitlab_data/posgresql/_.
+This is a longer YAML, so worth to take a longer look at it, i.e. notice _ports_ and _envFrom_ in the spec.
 
-```
+_Note: the purpose for mounting_ gitlab-data-pvc _volume is only for obtaining the dumped database file that has been saved under_ /gitlab_volumes/gitlab_data/posgresql/ _. Once import is completed, the volume and volumeMount pair can be deleted and the change applied to the deployment._
+
+```c
 # kubectl create -f postgres-deployment.yml
 ```
 
+Expected result:  
+`kubectl get deployments`
+```
+NAME       READY   UP-TO-DATE   AVAILABLE   AGE
+postgres   1/1     1            1           2m7s
+```
+`kubectl get pods`
+```
+kubectl get pods
+NAME                       READY   STATUS    RESTARTS   AGE
+postgres-c5bd4985f-8fw7l   1/1     Running   0          2m10s
+```
 <br/>
 
 ### Expose Postgres via a Service
@@ -323,27 +356,27 @@ spec:
 EOF
 ```
 
-```
+```c
 # kubectl create -f postgres-svc.yml
 ```
 
 *Important Note*: apparently Minikube has a bug that somehow breaks internal DNS resolution, therefore I advise to grab the service IP and use it instead of service DNS in Gitlab configuration below. To obtain the IP execute:
-```
+```c
 # kubectl get svc postgres-service -o=jsonpath='{.spec.clusterIP}'
 ```
 
 You can verify if you are impacted by this bug by executing:
+```c
+# kubectl exec -it busybox nslookup postgres-service
 ```
-kubectl exec -it busybox nslookup postgres-service
-```
-It should resolve to the clusterIP
+It should resolve to the clusterIP (you'll need to re-create your busybox).
 
 <br/>
 
 ### Import the data to Postgres
 
 Note: In addition to importing the dumped database, _gitlab_ role must be created manually, hence one additional step.
-```
+```c
 # kubectl exec -it postgres[TAB] bash
 ```
 ```
@@ -374,8 +407,8 @@ data:
 EOF
 ```
 
-```
-# kubectl create -f postgres-svc.yml
+```c
+# kubectl create -f gitlab-config.yml
 ```
 
 Please note that in real world scenario a hard-coded clusterIP is a bad design pattern. The only reason for doing so is to work around the Minikube bug.
@@ -436,8 +469,14 @@ spec:
         runAsGroup: 0
 EOF
 ```
-```
+```c
 # kubectl create -f gitlab-deployment.yml
+```
+
+As previously, it takes some 2-3 minutes for Gitlab components to get up. You can follow the process with:
+
+```c
+# kubectl logs -f gitlab[TAB]
 ```
 
 <br/>
@@ -445,7 +484,7 @@ EOF
 ### Create a Load Balancer for Gitlab
 
 ```
-cat << EOF | tee gitlab-elb.yml
+cat << EOF | tee gitlab-lb.yml
 apiVersion: v1
 kind: Service
 metadata:
@@ -459,29 +498,27 @@ spec:
     app: gitlab
 EOF
 ```
-As previously, it takes some 2-3 minutes for Gitlab components to get up. You can follow the process with:
 
+```c
+# kubectl create -f gitlab-lb.yml
 ```
-# kubectl logs -f gitlab
-```
+
 
 <br/>
 
 ## Step 6: Test it
+
+Generate your Gitlab URL using its load balancer IP:
+```c
+# kubectl get svc gitlab-lb -o=jsonpath='http://{.spec.clusterIP}/'
+```
 
 Use the following command to make your LoadBalancer available locally:
 ```
 # minikube -p gitlab tunnel
 ```
 
-Grab your load balancer IP:
-```
-# kubectl get svc gitlab-lb -o=jsonpath='{.spec.clusterIP}'
-```
-
-and point your browser to http://\<load-balancer-IP\>/
-
-Verify if your are able to login and whether you can see the project you commenced as well as the README.md file you created in it.
+Point your browser to the address and verify if your are able to login and whether you can see the project you commenced as well as the README.md file you created in it.
 
 
 
